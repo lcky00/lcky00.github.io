@@ -47,6 +47,11 @@ I primi 4 byte di qualsiasi pacchetto SMB dicono subito con che versione si ha a
 
 (Tra SMB1 e SMB2 cambia completamente la struttura del pacchetto: SMB2 ha un header fisso a 64 byte e una struttura per-messaggio sempre fissa, con padding a 8 byte. SMB1 invece è tutto più "dinamico" - WordCount e ByteCount variabili. In questo studio mi concentro su SMB1/CIFS perché è il terreno su cui gira NTLM in modo più diretto da intercettare.)
 
+> **Riferimenti e approfondimenti:**
+> - [\[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) - specifica base di CIFS/SMB1 (header, WordCount, ByteCount, dialetti "archeologici").
+> - [\[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb) - estensioni per `NT LM 0.12`, inclusa la Extended Security.
+> - [\[MS-SMB2\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/) - specifica di SMB2.
+
 ### 2.1 SMB_Header (32 byte fissi)
 
 L'header ha dimensione fissa, sempre 32 byte:
@@ -73,7 +78,7 @@ SMB_Header {
 I campi che contano di più per il nostro scopo:
 
 - **Protocol** (4 byte): la stringa letterale `'\xFF', 'S', 'M', 'B'`.
-- **Command** (1 byte): il codice del comando (`0x72` = NEGOTIATE, `0x73` = SESSION_SETUP_ANDX, ecc.).
+- **Command** (1 byte): il codice del comando ([lista completa dei comandi SMB1](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/32b5d4b7-d90b-483f-ad6a-003fd110f0ec); `0x72` = NEGOTIATE, `0x73` = SESSION_SETUP_ANDX, ecc.).
 - **Flags2** (2 byte): bit flag, tra cui `SMB_FLAGS2_EXTENDED_SECURITY` - è questo bit che segnala l'uso dell'autenticazione estesa (NTLMSSP) invece del vecchio schema LM.
 - **SecurityFeatures** (8 byte): in caso di SMB signing contiene una firma di 8 byte; su trasporto connectionless ha un'altra interpretazione (Key/CID/SequenceNumber). Non ci interessa direttamente per l'intercettazione NTLM.
 - **TID / PIDLow / UID / MID**: identificatori di tree, processo, utente e multiplexing - servono a correlare richieste e risposte sulla stessa connessione.
@@ -170,6 +175,8 @@ SMB_Data {
 
 Il campo che ci interessa davvero è l'ultimo: **SecurityBlob** (variabile), un BLOB che dovrebbe contenere un token di autenticazione prodotto dal protocollo GSS - ed è esattamente il punto in cui finisce SMB "puro" e inizia il mondo ASN.1/SPNEGO/NTLMSSP che vediamo nel resto del post. **ServerGUID** (16 byte), invece, identifica univocamente il server (non va usato come metodo sicuro di identificazione, essendo falsificabile).
 
+> **Riferimenti e approfondimenti:** [SMB_COM_NEGOTIATE (sezione 2.2.4.52), \[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/96ccc2bd-67ba-463a-bb73-fd6a9265199e) · [SMB_COM_NEGOTIATE, \[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb/d883d0a5-5a0a-4626-8e3e-87b0b66b79aa)
+
 Ed è lì, nel `SecurityBlob`, che inizia la parte interessante.
 
 ## 3. L'handshake NTLM sopra SMB1
@@ -226,6 +233,14 @@ Il formato di trasferimento è sempre **TLV** (Tag, Length, Value):
 
 Alcuni tag ricorrenti nei blob SMB: `0x30` (SEQUENCE), `0x06` (OBJECT IDENTIFIER), `0x04` (OCTET STRING - il punto in cui, come vedremo, ASN.1 "muore" e inizia NTLMSSP).
 
+> **Riferimenti e approfondimenti:**
+> - [Introduction to ASN.1 Syntax and Encoding](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-introduction-to-asn-1-syntax-and-encoding)
+> - [Encoded Tag Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-tag-bytes)
+> - [DER Transfer Syntax](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-transfer-syntax)
+> - [Encoded Length and Value Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-length-and-value-bytes)
+> - [DER Encoding of ASN.1 Types](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-encoding-of-asn-1-types)
+> *(fonte: Microsoft Learn)*
+
 Per esercitarmi su questo ho scritto **[asn1_parser](https://github.com/lcky00/asn1_parser)**, un parser DER minimale in C che costruisce un albero navigabile dei nodi, con tanto di logger per stampare la struttura annidata:
 
 ```c
@@ -251,7 +266,7 @@ Il modo più utile che ho trovato per visualizzare il `SecurityBlob` è come una
 2. **SPNEGO (`negTokenInit` / `negTokenResp`)** - anch'esso ASN.1 DER, contiene la lista dei meccanismi supportati (gli OID) e lo stato della negoziazione.
 3. **Il payload del meccanismo scelto (NTLMSSP)** - da qui ASN.1 finisce: il payload è incapsulato in un **Octet String** (`0x04`), e da quel byte in poi si passa alle regole specifiche di NTLMSSP, in **little-endian**.
 
-Perché serve SPNEGO? Perché client e server potrebbero supportare meccanismi diversi (Kerberos, NTLM...): **GSSAPI** fornisce l'interfaccia standard per gestire la sicurezza senza conoscere i dettagli del meccanismo specifico, mentre **SPNEGO** (RFC 4178) è lo "pseudo-meccanismo" che permette di negoziare in sicurezza quale meccanismo reale usare.
+Perché serve SPNEGO? Perché client e server potrebbero supportare meccanismi diversi (Kerberos, NTLM...): **GSSAPI** ([RFC 2743](https://datatracker.ietf.org/doc/html/rfc2743)) fornisce l'interfaccia standard per gestire la sicurezza senza conoscere i dettagli del meccanismo specifico, mentre **SPNEGO** ([RFC 4178](https://datatracker.ietf.org/doc/html/rfc4178)) è lo "pseudo-meccanismo" che permette di negoziare in sicurezza quale meccanismo reale usare.
 
 I due tipi di token SPNEGO principali sono:
 
@@ -268,15 +283,15 @@ Mettendo insieme quanto visto finora, ecco com'è fatto ciascuno dei 4 blob di s
 
 ![Fase 1: SMB_COM_NEGOTIATE Response](/assets/img/smb-ntlm-study/blob1-negotiate.png)
 
-**Fase 2 - `SMB_COM_SESSION_SETUP_ANDX` Request, NTLMSSP_NEGOTIATE.** Il client risponde con un `mechTypes` ridotto al solo OID scelto, e nel `mechToken` (`0xa2`) inserisce l'**Octet String** (`0x04`) che contiene il primo pacchetto NTLM vero e proprio, riconoscibile dalla firma `"NTLMSSP\0"` seguita dal Message Type `0x01000000` (NEGOTIATE) e dai flag di negoziazione.
+**Fase 2 - `SMB_COM_SESSION_SETUP_ANDX` Request, NTLMSSP_NEGOTIATE.** Il client risponde con un `mechTypes` ridotto al solo OID scelto, e nel `mechToken` (`0xa2`) inserisce l'**Octet String** (`0x04`) che contiene il primo pacchetto NTLM vero e proprio ([NTLM Type 1, \[MS-NLMP\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/b34032e5-3aae-4bc6-84c3-c6d80eadf7f2)), riconoscibile dalla firma `"NTLMSSP\0"` seguita dal Message Type `0x01000000` (NEGOTIATE) e dai flag di negoziazione.
 
 ![Fase 2: NTLMSSP_NEGOTIATE](/assets/img/smb-ntlm-study/blob2-ntlm-negotiate.png)
 
-**Fase 3 - `SMB_COM_SESSION_SETUP_ANDX` Response, NTLMSSP_CHALLENGE.** Qui il tag cambia da `negTokenInit` a **`negTokenResp` (`0xa1`)**: l'header GSS-API (`0x60`) scompare perché il contesto è già stabilito. Dentro troviamo `negState` (`accept-incomplete`), `supportedMech` e `responseToken`, che contiene il pacchetto NTLM Type 2 con il **server challenge** (8 byte) e il **Target Info** con i dettagli del dominio/host del server.
+**Fase 3 - `SMB_COM_SESSION_SETUP_ANDX` Response, NTLMSSP_CHALLENGE.** Qui il tag cambia da `negTokenInit` a **`negTokenResp` (`0xa1`)**: l'header GSS-API (`0x60`) scompare perché il contesto è già stabilito. Dentro troviamo `negState` (`accept-incomplete`), `supportedMech` e `responseToken`, che contiene il pacchetto [NTLM Type 2, \[MS-NLMP\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/801a4681-8809-4be9-ab0d-61dcfe762786) con il **server challenge** (8 byte) e il **Target Info** con i dettagli del dominio/host del server.
 
 ![Fase 3: NTLMSSP_CHALLENGE](/assets/img/smb-ntlm-study/blob3-ntlm-challenge.png)
 
-**Fase 4 - `SMB_COM_SESSION_SETUP_ANDX` Request, NTLMSSP_AUTH.** Il client chiude il giro con un `negTokenResp` contenente solo `responseToken`: al suo interno il pacchetto NTLM Type 3, con gli header per LM/NTLM Response, Domain, Username, Workstation, il **NTProofStr** (hash calcolato sulla challenge) e il **MIC**, seguiti dai valori effettivi delle stringhe ai rispettivi offset.
+**Fase 4 - `SMB_COM_SESSION_SETUP_ANDX` Request, NTLMSSP_AUTH.** Il client chiude il giro con un `negTokenResp` contenente solo `responseToken`: al suo interno il pacchetto [NTLM Type 3, \[MS-NLMP\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/033d32cc-88f9-4483-9bf2-b273055038ce), con gli header per LM/NTLM Response, Domain, Username, Workstation, il **NTProofStr** (hash calcolato sulla challenge) e il **MIC**, seguiti dai valori effettivi delle stringhe ai rispettivi offset.
 
 ![Fase 4: NTLMSSP_AUTH](/assets/img/smb-ntlm-study/blob4-ntlm-auth.png)
 
@@ -328,6 +343,18 @@ L'idea alla base è semplice ma va gestita con attenzione: alla ricezione si ver
 ## Conclusioni
 
 Quello che inizialmente era "voglio capire come funziona NTLM su SMB1" è diventato uno studio completo che tocca trasporto (NetBIOS), formati binari (SMB1), codifiche a oggetti (ASN.1 DER), negoziazione (SPNEGO) e infine il protocollo di autenticazione vero e proprio (NTLMSSP) - il tutto validato scrivendo i parser da zero in C e un server che li mette alla prova contro un client reale.
+
+## Fonti
+
+Le specifiche ufficiali usate per questo studio:
+
+- [\[MS-CIFS\]: Common Internet File System](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) - struttura base di SMB1/CIFS
+- [\[MS-SMB\]: Server Message Block Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb) - estensioni NT LM 0.12 ed Extended Security
+- [\[MS-SMB2\]: Server Message Block Version 2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/)
+- [\[MS-NLMP\]: NT LAN Manager (NTLM) Authentication Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/)
+- [RFC 4178 - The Simple and Protected GSS-API Negotiation Mechanism (SPNEGO)](https://datatracker.ietf.org/doc/html/rfc4178)
+- [RFC 2743 - Generic Security Service Application Program Interface (GSSAPI)](https://datatracker.ietf.org/doc/html/rfc2743)
+- Microsoft Learn, serie "About ASN.1": [Introduction to ASN.1 Syntax and Encoding](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-introduction-to-asn-1-syntax-and-encoding), [Encoded Tag Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-tag-bytes), [DER Transfer Syntax](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-transfer-syntax), [Encoded Length and Value Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-length-and-value-bytes), [DER Encoding of ASN.1 Types](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-encoding-of-asn-1-types)
 
 Le repo del progetto, se volete guardare il codice nel dettaglio:
 
