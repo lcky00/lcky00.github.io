@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "BusFinder: un'euristica per minimizzare i cambi con GTFS (e i suoi limiti)"
-date: 2026-10-09
+date: 2026-08-31
 author: lcky00
 tags: [GTFS, grafi, Java, Spring, trasporto pubblico]
 ---
