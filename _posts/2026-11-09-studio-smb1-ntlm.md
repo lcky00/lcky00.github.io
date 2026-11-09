@@ -6,21 +6,23 @@ author: lcky00
 tags: [SMB1, NTLM, ASN.1, SPNEGO, Red Team]
 ---
 
-Negli ultimi mesi mi sono dedicato a uno studio approfondito di **SMB1** e di come al suo interno viaggia l'autenticazione **NTLM**. Non un'analisi "ad alto livello" presa da qualche slide, ma uno smontaggio byte per byte dei pacchetti scambiati tra client e server, fino a scrivere dei parser in **C** che li decodificano da zero.
+Per la rubrica *"io che studio cose vecchie (ma interessanti) :-D"*, negli ultimi mesi mi sono dedicato a uno studio approfondito di **SMB1** e di come al suo interno viaggia l'autenticazione **NTLM**.
+Questo post mette insieme il lavoro fatto in diverse repo (gli appunti di studio, i parser e un server per l'intercettazione dell'autenticazione) in un unico percorso: da NetBIOS fino all'ultimo byte del blob NTLMSSP.
 
-Questo post mette insieme il lavoro fatto in diverse repo (gli appunti di studio, i parser e un server di validazione) in un unico percorso: da NetBIOS fino all'ultimo byte del blob NTLMSSP.
-
-> Lo studio è nato per capire davvero come funziona l'autenticazione NTLM su SMB1, a livello di red teaming/offensive security e di didattica del protocollo. Tutto il codice è pensato per essere usato in ambienti autorizzati.
+Lo studio è nato per capire davvero come funziona l'autenticazione NTLM su SMB1, a livello di red teaming/offensive security e di didattica del protocollo.
 
 ## 1. Il trasporto: NetBIOS e SMB
 
-Prima di arrivare ai pacchetti SMB veri e propri, c'è da capire su cosa viaggiano. **NetBIOS** è un vecchio "modo" per far parlare tra loro i computer in una LAN, prima che DNS e TCP/IP diventassero lo standard. Forniva tre cose fondamentali:
+Prima di arrivare ai pacchetti SMB veri e propri, c'è da capire su cosa viaggiano. **NetBIOS** è un vecchio protocollo per far parlare tra loro i computer in una LAN, prima che DNS e TCP/IP diventassero lo standard. Forniva tre cose fondamentali:
 
 1. **Un nome** al computer, risolto in broadcast sulla rete (non DNS).
-2. **La possibilità di trovare altri host** tramite broadcast ("Chi si chiama PC-MARIO?" → "Sono io").
-3. **Una sessione** sopra cui far viaggiare messaggi applicativi - ed è proprio sopra questa sessione che viaggia SMB.
+2. **La possibilità di trovare altri host** tramite broadcast.
+3. **Una sessione** sopra cui far viaggiare messaggi applicativi, ed è proprio sopra questa sessione che viaggia SMB.
 
 Con l'arrivo di TCP/IP, Microsoft ha fatto girare NetBIOS sopra TCP/UDP, e oggi è sostanzialmente ridondante ma mantenuto per retrocompatibilità. Il risultato è che SMB oggi può viaggiare in due modi:
+
+* iaggiare dentro **NetBIOS**, che viaggia su **TCP/UDP**.
+* oppure direttamente su **TCP/IP** (porta 445).
 
 | Servizio | Porta | A cosa serve |
 |---|---|---|
@@ -29,32 +31,82 @@ Con l'arrivo di TCP/IP, Microsoft ha fatto girare NetBIOS sopra TCP/UDP, e oggi 
 | NetBIOS Session | TCP 139 | Trasporto SMB **dentro** NetBIOS |
 | SMB diretto | TCP 445 | SMB **senza** NetBIOS |
 
-Nel caso di **Direct TCP** (porta 445), ogni messaggio SMB **DEVE** essere preceduto da un'intestazione di trasporto di 4 byte:
+Nel caso di **Direct TCP** (porta 445), ogni messaggio SMB **DEVE** essere preceduto da un'intestazione di trasporto di **4 byte**:
 
 ![Direct TCP Transport Header](/assets/img/smb-ntlm-study/pkt-transport-header.png)
 
 - **Zero** (1 byte): DEVE essere `0x00`.
-- **Lunghezza del protocollo di flusso** (3 byte): la lunghezza, in byte, del messaggio SMB che segue, codificata come intero a 3 byte in network byte order. Non include questi stessi 4 byte di header. Se il valore supera `0x1FFFF`, il server DOVREBBE disconnettere la connessione.
+- **Lunghezza del messaggio SMB** (3 byte): la lunghezza, in byte, del messaggio SMB che segue, codificata come intero a 3 byte in network byte order. Non include questi stessi 4 byte di header. Se il valore supera `0x1FFFF`, il server DOVREBBE disconnettere la connessione.
+- **Messaggio SMB (variabile)**: il corpo del pacchetto SMB. La lunghezza di un messaggio SMB varia in base al comando SMB rappresentato dal messaggio.
 
-È un dettaglio minimo ma fondamentale quando si scrive un parser: bisogna prima bufferizzare questi 4 byte, poi sapere quanti byte aspettarsi per il messaggio completo - esattamente il meccanismo di buffering che ho implementato in `smb1_parser` e in `impostor` (lo vediamo più avanti).
+E' un dettaglio minimo ma fondamentale quando si scrive un parser, bisogna prima bufferizzare questi 4 byte, poi sapere quanti byte aspettarsi per il messaggio completo, esattamente il meccanismo di buffering che ho implementato in `smb1_parser` e in `impostor` (lo vediamo più avanti).
 
-## 2. Il pacchetto SMB1
+## 2. Facciamo chiarezza: SMB? CIFS?
 
-SMB1 (noto anche come **CIFS**) è un protocollo binario con specifiche e strutture **fisse** per richieste e risposte, diviso in tre blocchi dinamici: `SMB_Header`, `SMB_Parameters`, `SMB_Data`.
+SMB è un protocollo per la condivisione di share in rete. Viene utilizzato anche per l'autenticazione tra il server e client SMB, quindi nei loro scambi viaggia l'handshake NTLM.
+La prima versione di SMB è **SMB1** (conosciuta anche come **CIFS**). Mentre la versione più recente è SMB2. Le specifiche ufficiali di Microsoft si trovano qua:
+* **SMB1 / CIFS**: [MS-SMB](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) contiene delle estensioni a [MS-CIFS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs). Utili soprattutto per l'autenticazione. Infatti viene estesa l'autenticazione per **NTLMSSP**, all'interno dei messaggi SMB.
+* **SMB2**: [MS-SMB2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/) contiene le specifiche di SMB2 che è stato completamente rivisto ma la logica dell'autenticazione NTLM è praticamente identica.
 
-I primi 4 byte di qualsiasi pacchetto SMB dicono subito con che versione si ha a che fare:
+SMB è un protocollo binario con specifiche e strutture fisse per le richieste e risposte. Tra SMB1 e SMB2 è cambiata la **struttura del pacchetto**.
 
-- `0xFF 'S' 'M' 'B'` → **SMB1**
-- `0xFE 'S' 'M' 'B'` → **SMB2**
+Un "pacchetto" SMB1 è composto da strutture **dinamiche**, che sono:
+* un `SMB_Header`: contiene informazioni sul protocollo usato, inclusa la versione.
+* un `SMB_Parameters`: può contenere qualsiasi struttura arbitraria. Il formato della struttura è definito individualmente per ogni messaggio di comando.
+* un `SMB_Data`: I dati effettivi in base al tipo di messaggio.
 
-(Tra SMB1 e SMB2 cambia completamente la struttura del pacchetto: SMB2 ha un header fisso a 64 byte e una struttura per-messaggio sempre fissa, con padding a 8 byte. SMB1 invece è tutto più "dinamico" - WordCount e ByteCount variabili. In questo studio mi concentro su SMB1/CIFS perché è il terreno su cui gira NTLM in modo più diretto da intercettare.)
+Un "pacchetto" SMB2 invece è composto da:
+* **Header Fisso**: Sempre 64 byte.
+* **Struttura del Messaggio**: Ogni comando (come `NEGOTIATE` o `SESSION_SETUP`) ha la sua struttura fissa definita nella documentazione.
+* **Padding**: SMB2 usa molto il padding per allineare i dati a 8 byte, rendendo l'accesso alla memoria più veloce in C.
+
+> In questo articolo esploreremo SMB1.
+
+Quindi il modo ti trattare pacchetti di versioni SMB cambia molto. Si può capire con che versione si ha a che fare attraverso un controllo dei primi **4 bytes**, che in tutte le versioni indicano la versione di SMB. Questi valori possono essere:
+* **SMB1**: `0x424D53FF`, in network order, `0xFF, 'S', 'M', and 'B'`.
+* **SMB2**: `0x424D53FE`, in network order, `0xFE, 'S', 'M', and 'B'`.
+
+In SMB un **dialetto** è una **variante negoziabile del protocollo**, che definisce **formato** dei messaggi, **comandi** supportati e **semantica**. Il dialetto si decide in una prima fase di negoziazione. Per esempio il client invia una lista di stringhe, che rappresentano dei dialetti:
+
+```
+PC NETWORK PROGRAM 1.0
+LANMAN1.0
+Windows for Workgroups 3.1a
+NT LM 0.12
+```
+Il server ne sceglie uno in base a quelli che supporta.
+
+C'è un po' di **confusione** con le nomenclature e sui **dialetti** in generale. 
+
+**CIFS** è il nome commerciale del dialetto `NT LM 0.12` di SMB1. Ma viene anche associato a SMB1, perché storicamente CIFS è stato il dominatore dei dialetti di SMB1. Per fare un po' di ordine: N**on ci interessano altri dialetti prima di NT LM 0.12** perché sono vecchi e obsoleti e nessun client Windows li userebbe mai.
+
+Quindi:
+* Dialetti come `LANMAN` o PC `NETWORK` sono reperti archeologici. Un client Windows moderno (anche se ha SMB1 abilitato per retrocompatibilità) non li userebbe mai per scambiare credenziali perché mancano di tutte le estensioni di sicurezza necessarie. 
+* `NT LM 0.12` come "_Lingua Franca_": Quando si parla di SMB1 oggi, ci si riferisce quasi sempre a questo dialetto. è il "minimo comune denominatore" che permette a un client (anche Windows 10/11, se la funzionalità è attiva) di parlare con un server legacy.
+
+Il legame tra le Docs: 
+* **[MS-CIFS]** fornisce lo scheletro (come si calcolano le lunghezze, come sono fatti i pacchetti base). E' lo "standard di base" diciamo. Ti spiega come si costruiscono le frasi (**Header**, **WordCount**, **ByteCount**), ma include anche parole e verbi arcaici che nessuno usa più. E' scritto in modo da poter ospitare qualsiasi dialetto, anche quelli per il DOS.
+* **[MS-SMB]** aggiunge la "carne" specifica per `NT LM 0.12`, spiegando come quel pacchetto base viene esteso per supportare le funzioni di NT (come i permessi **ACL** e, soprattutto, la **Extended Security**). E' il "**manuale delle estensioni moderne**". E' la documentazione che dice: "_Ok, ora che sai come si costruisce una frase (grazie a MS-CIFS), ecco come devi parlare se vuoi usare il dialetto `NT LM 0.12`_". Si focalizza quasi esclusivamente sull'evoluzione del protocollo portata da Windows NT/2000.
+
+Esempio per fissare idee: Quando un client Windows moderno (es. Windows 10) parla SMB1, invia un pacchetto `NEGOTIATE` con una lista di dialetti. Se il tuo server risponde scegliendo `NT LM 0.12`, il client apre mentalmente la documentazione [MS-SMB].
+
+## 3. Il pacchetto SMB1
+
+SMB1 è un protocollo binario con specifiche e strutture **fisse** per richieste e risposte, diviso in tre blocchi dinamici: `SMB_Header`, `SMB_Parameters`, `SMB_Data`.
+
+Come anticipato poco fa, i primi **4 byte** di qualsiasi pacchetto SMB dicono subito con che versione si ha a che fare:
+
+- `0xFF 'S' 'M' 'B'`: **SMB1**
+- `0xFE 'S' 'M' 'B'`: **SMB2**
+
+> Tra SMB1 e SMB2 cambia completamente la struttura del pacchetto. SMB2 ha un header fisso a **64 byte** e una struttura per-messaggio sempre fissa, con padding a 8 byte. SMB1 invece è tutto più "dinamico", **WordCount** e **ByteCount** variabili. In questo studio mi concentro su **SMB1/CIFS** perché è il terreno su cui gira NTLM in modo più diretto da intercettare.
 
 > **Riferimenti e approfondimenti:**
-> - [\[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) - specifica base di CIFS/SMB1 (header, WordCount, ByteCount, dialetti "archeologici").
-> - [\[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb) - estensioni per `NT LM 0.12`, inclusa la Extended Security.
-> - [\[MS-SMB2\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/) - specifica di SMB2.
+> - [\[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs): specifica base di CIFS/SMB1 (`header`, `WordCount`, `ByteCount`, dialetti "archeologici").
+> - [\[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb): estensioni per `NT LM 0.12`, inclusa la Extended Security.
+> - [\[MS-SMB2\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/): specifica di SMB2.
 
-### 2.1 SMB_Header (32 byte fissi)
+### 3.1 SMB_Header (32 byte fissi)
 
 L'header ha dimensione fissa, sempre 32 byte:
 
@@ -85,7 +137,7 @@ I campi che contano di più per il nostro scopo:
 - **SecurityFeatures** (8 byte): in caso di SMB signing contiene una firma di 8 byte; su trasporto connectionless ha un'altra interpretazione (Key/CID/SequenceNumber). Non ci interessa direttamente per l'intercettazione NTLM.
 - **TID / PIDLow / UID / MID**: identificatori di tree, processo, utente e multiplexing - servono a correlare richieste e risposte sulla stessa connessione.
 
-### 2.2 Parameter Block e Data Block
+### 3.2 Parameter Block e Data Block
 
 Dopo l'header fisso vengono due blocchi a struttura variabile, il cui contenuto dipende dal comando:
 
@@ -111,13 +163,13 @@ SMB_Data {
 ![SMB_Data](/assets/img/smb-ntlm-study/pkt-smb-data.png)
 
 - **ByteCount** (2 byte): la dimensione in byte del campo `Bytes`. Può essere zero.
-- **Bytes** (variabile): i dati specifici del comando - è qui, ad esempio, che viaggia il `SecurityBlob`.
+- **Bytes** (variabile): i dati specifici del comando. E' qui, ad esempio, che viaggia il `SecurityBlob`.
 
-Nota implementativa: poiché l'header è 32 byte (dispari rispetto all'allineamento a 2 byte) e `WordCount` è 1 byte, il campo `Words` che segue risulta **non allineato** in memoria - un dettaglio da tenere a mente scrivendo un parser in C che fa casting diretto su buffer.
+Nota implementativa: poiché l'header è 32 byte (dispari rispetto all'allineamento a 2 byte) e `WordCount` è 1 byte, il campo `Words` che segue risulta **non allineato** in memoria, ch è un dettaglio da tenere a mente scrivendo un parser in C che fa casting diretto su buffer.
 
-### 2.3 Dialetti e negoziazione
+### 3.3 Dialetti e negoziazione
 
-In SMB un **dialetto** è una variante negoziabile del protocollo: definisce formato dei messaggi, comandi supportati e semantica. Nel pacchetto `SMB_COM_NEGOTIATE` (`0x72`) - il primo scambiato su ogni connessione SMB, e l'UNICO ammesso per connessione (richieste successive DEVONO essere rifiutate) - il client propone una lista di dialetti supportati, in ordine di preferenza crescente:
+Nel pacchetto `SMB_COM_NEGOTIATE` (`0x72`), il primo scambiato su ogni connessione SMB e l'UNICO ammesso per connessione (richieste successive DEVONO essere rifiutate), il client propone una lista di dialetti supportati, in ordine di preferenza crescente:
 
 ```
 PC NETWORK PROGRAM 1.0
@@ -137,10 +189,10 @@ SMB_Dialect {
 
 ![SMB_COM_NEGOTIATE Request - SMB_Dialect](/assets/img/smb-ntlm-study/pkt-negotiate-req-dialect.png)
 
-- **BufferFormat** (1 byte): DEVE essere `0x02` - indicatore che il campo seguente è un array di caratteri null-terminated.
+- **BufferFormat** (1 byte): DEVE essere `0x02` - indicatore che il campo seguente E' un array di caratteri null-terminated.
 - **DialectString** (variabile): la stringa del dialetto, null-terminated.
 
-`NT LM 0.12` è, di fatto, la "lingua franca" di SMB1 oggi: è il minimo comune denominatore che qualsiasi client Windows moderno (anche con SMB1 abilitato solo per retrocompatibilità) userà per negoziare con un server legacy - dialetti come `LANMAN` o `PC NETWORK` sono reperti archeologici che nessun client Windows userebbe mai per scambiare credenziali, perché privi delle estensioni di sicurezza necessarie. Quando si parla di SMB1 oggi, ci si riferisce quasi sempre a `NT LM 0.12` (storicamente associato anche al nome commerciale **CIFS**).
+`NT LM 0.12` è, di fatto, la "lingua franca" di SMB1 oggi: E' il minimo comune denominatore che qualsiasi client Windows moderno (anche con SMB1 abilitato solo per retrocompatibilità) userà per negoziare con un server legacy - dialetti come `LANMAN` o `PC NETWORK` sono reperti archeologici che nessun client Windows userebbe mai per scambiare credenziali, perché privi delle estensioni di sicurezza necessarie. Quando si parla di SMB1 oggi, ci si riferisce quasi sempre a `NT LM 0.12` (storicamente associato anche al nome commerciale **CIFS**).
 
 Il server risponde con un `SMB_COM_NEGOTIATE` Response. Il `WordCount` della risposta è variabile finché non si sa quale dialetto è stato scelto; il primo campo DEVE sempre essere `DialectIndex` (l'indice, a partire da `0x0000`, del dialetto scelto nella lista; `0xFFFF` se nessuno è supportato). Se il dialetto negoziato è `NT LM 0.12`, la struttura si espande così:
 
@@ -181,7 +233,7 @@ Il campo che ci interessa davvero è l'ultimo: **SecurityBlob** (variabile), un 
 
 Ed è lì, nel `SecurityBlob`, che inizia la parte interessante.
 
-## 3. L'handshake NTLM sopra SMB1
+## 4. L'handshake NTLM sopra SMB1
 
 Il flusso di autenticazione, nel caso tipico con **Extended Security** attiva, segue 5 passi. Ecco una cattura reale (Wireshark) dello scambio completo, dai 6 pacchetti che contano:
 
@@ -213,7 +265,7 @@ Nella cattura di esempio, dopo questo scambio il server risponde con `STATUS_ACC
 
 Il punto chiave di tutto lo scambio è che dentro il `SecurityBlob` convivono **due mondi diversi**: una parte codificata in ASN.1 (GSSAPI/SPNEGO) e una parte che, a un certo punto, "esce" da ASN.1 ed è codificata secondo NTLMSSP, in little-endian. Nei prossimi paragrafi vediamo perché, ed entriamo byte per byte in entrambi i livelli.
 
-## 4. ASN.1 DER: il linguaggio sotto SPNEGO
+## 5. ASN.1 DER: il linguaggio sotto SPNEGO
 
 **ASN.1** è un linguaggio che descrive strutture dati, ma non dice come serializzarle in byte: per quello servono le **Encoding Rules**. Nel nostro caso, i blob di sicurezza SMB usano **DER** (Distinguished Encoding Rules), un sottoinsieme stretto di BER che garantisce una codifica unica e deterministica.
 
@@ -301,7 +353,7 @@ Per parsare questo ultimo livello (il pacchetto NTLM vero e proprio) ho scritto 
 
 ## 7. Il parser SMB1 e la catena completa
 
-A monte di tutto, ovviamente, serve un parser del pacchetto SMB1 in sé: **[smb1_parser](https://github.com/lcky00/smb1_parser)** è un parser difensivo, scritto per estrarre il `security_blob` esattamente dai due comandi che interessano per l'autenticazione NTLM: `SMB_COM_NEGOTIATE` (`0x72`) e `SMB_COM_SESSION_SETUP_ANDX` (`0x73`). È volutamente **limitato a questi due comandi** e alla variante con extended security (il `WordCount` lo determina): non è un'implementazione generica del protocollo, è uno strumento mirato.
+A monte di tutto, ovviamente, serve un parser del pacchetto SMB1 in sé: **[smb1_parser](https://github.com/lcky00/smb1_parser)** è un parser difensivo, scritto per estrarre il `security_blob` esattamente dai due comandi che interessano per l'autenticazione NTLM: `SMB_COM_NEGOTIATE` (`0x72`) e `SMB_COM_SESSION_SETUP_ANDX` (`0x73`). E' volutamente **limitato a questi due comandi** e alla variante con extended security (il `WordCount` lo determina): non è un'implementazione generica del protocollo, è uno strumento mirato.
 
 Messi in fila, i quattro parser formano una catena a strati che rispecchia esattamente il modello a cipolla visto prima:
 
