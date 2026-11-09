@@ -11,6 +11,11 @@ Questo post mette insieme il lavoro fatto in diverse repo (gli appunti di studio
 
 Lo studio è nato per capire davvero come funziona l'autenticazione NTLM su SMB1, a livello di red teaming/offensive security e di didattica del protocollo.
 
+**Indice**
+
+* TOC
+{:toc}
+
 ## 1. Il trasporto: NetBIOS e SMB
 
 Prima di arrivare ai pacchetti SMB veri e propri, c'è da capire su cosa viaggiano. **NetBIOS** è un vecchio protocollo per far parlare tra loro i computer in una LAN, prima che DNS e TCP/IP diventassero lo standard. Forniva tre cose fondamentali:
