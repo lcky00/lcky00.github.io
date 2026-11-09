@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "SMB1 e NTLM: studio del protocollo di autenticazione"
+title: "SMB1 e NTLM: studio dei protocolli"
 date: 2026-09-01
 author: lcky00
 tags: [SMB1, NTLM, ASN.1, SPNEGO, Red Team]
