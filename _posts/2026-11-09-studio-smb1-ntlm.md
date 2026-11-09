@@ -2,7 +2,11 @@
 layout: post
 title: "SMB1 e NTLM: uno studio byte-per-byte del protocollo di autenticazione"
 date: 2026-11-09
+author: lcky00
+tags: [SMB1, NTLM, ASN.1, SPNEGO, Red Team]
 ---
+
+*Tag: SMB1 · NTLM · ASN.1 · SPNEGO · Red Team*
 
 Negli ultimi mesi mi sono dedicato a uno studio approfondito di **SMB1** e di come al suo interno viaggia l'autenticazione **NTLM**. Non un'analisi "ad alto livello" presa da qualche slide, ma uno smontaggio byte per byte dei pacchetti scambiati tra client e server, fino a scrivere dei parser in **C** che li decodificano da zero.
 
@@ -344,6 +348,16 @@ L'idea alla base è semplice ma va gestita con attenzione: alla ricezione si ver
 
 Quello che inizialmente era "voglio capire come funziona NTLM su SMB1" è diventato uno studio completo che tocca trasporto (NetBIOS), formati binari (SMB1), codifiche a oggetti (ASN.1 DER), negoziazione (SPNEGO) e infine il protocollo di autenticazione vero e proprio (NTLMSSP) - il tutto validato scrivendo i parser da zero in C e un server che li mette alla prova contro un client reale.
 
+Le repo del progetto, se volete guardare il codice nel dettaglio:
+
+- [smb1_parser](https://github.com/lcky00/smb1_parser) - parser del pacchetto SMB1
+- [asn1_parser](https://github.com/lcky00/asn1_parser) - parser ASN.1 DER
+- [spnego_decoder](https://github.com/lcky00/spnego_decoder) - decoder SPNEGO zero-copy
+- [ntlm_parser](https://github.com/lcky00/ntlm_parser) - parser NTLMSSP
+- [impostor](https://github.com/lcky00/impostor) - server SMB1 di validazione, a macchina a stati
+
+Se avete domande o note su qualche passaggio, scrivetemi pure.
+
 ## Fonti
 
 Le specifiche ufficiali usate per questo studio:
@@ -355,13 +369,3 @@ Le specifiche ufficiali usate per questo studio:
 - [RFC 4178 - The Simple and Protected GSS-API Negotiation Mechanism (SPNEGO)](https://datatracker.ietf.org/doc/html/rfc4178)
 - [RFC 2743 - Generic Security Service Application Program Interface (GSSAPI)](https://datatracker.ietf.org/doc/html/rfc2743)
 - Microsoft Learn, serie "About ASN.1": [Introduction to ASN.1 Syntax and Encoding](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-introduction-to-asn-1-syntax-and-encoding), [Encoded Tag Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-tag-bytes), [DER Transfer Syntax](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-transfer-syntax), [Encoded Length and Value Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-length-and-value-bytes), [DER Encoding of ASN.1 Types](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-encoding-of-asn-1-types)
-
-Le repo del progetto, se volete guardare il codice nel dettaglio:
-
-- [smb1_parser](https://github.com/lcky00/smb1_parser) - parser del pacchetto SMB1
-- [asn1_parser](https://github.com/lcky00/asn1_parser) - parser ASN.1 DER
-- [spnego_decoder](https://github.com/lcky00/spnego_decoder) - decoder SPNEGO zero-copy
-- [ntlm_parser](https://github.com/lcky00/ntlm_parser) - parser NTLMSSP
-- [impostor](https://github.com/lcky00/impostor) - server SMB1 di validazione, a macchina a stati
-
-Se avete domande o note su qualche passaggio, scrivetemi pure.
