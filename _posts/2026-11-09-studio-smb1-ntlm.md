@@ -141,7 +141,7 @@ I campi che contano di più per il nostro scopo:
 
 Dopo l'header fisso vengono due blocchi a struttura variabile, il cui contenuto dipende dal comando:
 
-```
+```c
 SMB_Parameters {
    UCHAR  WordCount;
    USHORT Words[WordCount] (variable);
@@ -153,7 +153,7 @@ SMB_Parameters {
 - **WordCount** (1 byte): la dimensione, in parole da 2 byte, del campo `Words`. Può essere zero.
 - **Words** (variabile): la struttura specifica del comando, di dimensione `2 × WordCount` byte.
 
-```
+```c
 SMB_Data {
    USHORT ByteCount;
    UCHAR  Bytes[ByteCount] (variable);
@@ -177,10 +177,24 @@ LANMAN1.0
 Windows for Workgroups 3.1a
 NT LM 0.12
 ```
+La richiesta ha il seguente formato:
 
-Ogni voce della lista ha questo formato:
+```c
+SMB_Parameters {
+   UCHAR  WordCount;
+}
 
+SMB_Data {
+   USHORT ByteCount;
+   Bytes {
+     UCHAR Dialects[];
+   }
+}
 ```
+
+Ogni voce della lista `UCHAR Dialects[]` ha questo formato:
+
+```c
 SMB_Dialect {
    UCHAR      BufferFormat;
    OEM_STRING DialectString;
@@ -192,11 +206,9 @@ SMB_Dialect {
 - **BufferFormat** (1 byte): DEVE essere `0x02` - indicatore che il campo seguente E' un array di caratteri null-terminated.
 - **DialectString** (variabile): la stringa del dialetto, null-terminated.
 
-`NT LM 0.12` è, di fatto, la "lingua franca" di SMB1 oggi: E' il minimo comune denominatore che qualsiasi client Windows moderno (anche con SMB1 abilitato solo per retrocompatibilità) userà per negoziare con un server legacy - dialetti come `LANMAN` o `PC NETWORK` sono reperti archeologici che nessun client Windows userebbe mai per scambiare credenziali, perché privi delle estensioni di sicurezza necessarie. Quando si parla di SMB1 oggi, ci si riferisce quasi sempre a `NT LM 0.12` (storicamente associato anche al nome commerciale **CIFS**).
-
 Il server risponde con un `SMB_COM_NEGOTIATE` Response. Il `WordCount` della risposta è variabile finché non si sa quale dialetto è stato scelto; il primo campo DEVE sempre essere `DialectIndex` (l'indice, a partire da `0x0000`, del dialetto scelto nella lista; `0xFFFF` se nessuno è supportato). Se il dialetto negoziato è `NT LM 0.12`, la struttura si espande così:
 
-```
+```c
 SMB_Parameters {
    UCHAR  WordCount;
    Words {
@@ -227,15 +239,17 @@ SMB_Data {
 
 ![SMB_COM_NEGOTIATE Response (NT LM 0.12) - SMB_Data](/assets/img/smb-ntlm-study/pkt-negotiate-resp-data.png)
 
-Il campo che ci interessa davvero è l'ultimo: **SecurityBlob** (variabile), un BLOB che dovrebbe contenere un token di autenticazione prodotto dal protocollo GSS - ed è esattamente il punto in cui finisce SMB "puro" e inizia il mondo ASN.1/SPNEGO/NTLMSSP che vediamo nel resto del post. **ServerGUID** (16 byte), invece, identifica univocamente il server (non va usato come metodo sicuro di identificazione, essendo falsificabile).
+Il campo che ci interessa davvero è l'ultimo: **SecurityBlob** (variabile), un BLOB che dovrebbe contenere un token di autenticazione prodotto dal protocollo GSS, ed è esattamente il punto in cui finisce SMB "puro" e inizia il mondo ASN.1/SPNEGO/NTLMSSP che vediamo nel resto del post. **ServerGUID** (16 byte), invece, identifica univocamente il server (non va usato come metodo sicuro di identificazione, essendo falsificabile).
 
-> **Riferimenti e approfondimenti:** [SMB_COM_NEGOTIATE (sezione 2.2.4.52), \[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/96ccc2bd-67ba-463a-bb73-fd6a9265199e) · [SMB_COM_NEGOTIATE, \[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb/d883d0a5-5a0a-4626-8e3e-87b0b66b79aa)
+> **Riferimenti e approfondimenti:**
+> - [SMB_COM_NEGOTIATE (sezione 2.2.4.52), \[MS-CIFS\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/96ccc2bd-67ba-463a-bb73-fd6a9265199e)
+> - [SMB_COM_NEGOTIATE, \[MS-SMB\]](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb/d883d0a5-5a0a-4626-8e3e-87b0b66b79aa)
 
 Ed è lì, nel `SecurityBlob`, che inizia la parte interessante.
 
 ## 4. L'handshake NTLM sopra SMB1
 
-Il flusso di autenticazione, nel caso tipico con **Extended Security** attiva, segue 5 passi. Ecco una cattura reale (Wireshark) dello scambio completo, dai 6 pacchetti che contano:
+Il flusso di autenticazione, nel caso tipico con **Extended Security** attiva, segue 5 passi. Ecco una cattura con Wireshark dello scambio completo, dai 6 pacchetti che contano:
 
 ![Panoramica dello scambio SMB1/NTLM in Wireshark](/assets/img/smb-ntlm-study/wireshark-flow-overview.png)
 
@@ -243,7 +257,7 @@ Il flusso di autenticazione, nel caso tipico con **Extended Security** attiva, s
 
 ![Negotiate Protocol Request - dialetti richiesti](/assets/img/smb-ntlm-study/wireshark-negotiate-request.png)
 
-**2. Negotiate Protocol Response.** Il server risponde selezionando il dialetto scelto (qui `Selected Index: 1` → `NT LM 0.12`). Nel body, nel campo `SecurityBlob`, c'è un blob codificato in **ASN.1** che segnala che il meccanismo di negoziazione è **SPNEGO** (OID `1.3.6.1.5.5.2`): al suo interno (`negTokenInit` → `mechTypes`) il server propone i meccanismi di autenticazione supportati - in questo caso Kerberos (in varie forme) e **NTLMSSP** (`1.3.6.1.4.1.311.2.2.10`):
+**2. Negotiate Protocol Response.** Il server risponde selezionando il dialetto scelto (qui `Selected Index: 1` -> `NT LM 0.12`). Nel body, nel campo `SecurityBlob`, c'è un blob codificato in **ASN.1** che segnala che il meccanismo di negoziazione è **SPNEGO** (OID `1.3.6.1.5.5.2`): al suo interno (`negTokenInit` -> `mechTypes`) il server propone i meccanismi di autenticazione supportati, in questo caso Kerberos (in varie forme) e **NTLMSSP** (`1.3.6.1.4.1.311.2.2.10`):
 
 ![Negotiate Protocol Response - SecurityBlob con negTokenInit e mechTypes](/assets/img/smb-ntlm-study/wireshark-negotiate-response.png)
 
@@ -253,7 +267,7 @@ Il contenuto del `SecurityBlob` resta uguale tra SMB1 e SMB2: cambia solo l'invo
 
 ![Session Setup AndX Request - NTLMSSP_NEGOTIATE](/assets/img/smb-ntlm-study/wireshark-sessionsetup-negotiate.png)
 
-**4. Session Setup AndX Response (`0x73`), NTLMSSP_CHALLENGE.** Il server risponde con un altro `Session Setup AndX`, nel quale - come nella request del client - il `SecurityBlob` ha ancora l'involucro ASN.1/SPNEGO (ma ora `negTokenTarg`/`negState: accept-incomplete`), e al suo interno il `responseToken` contiene il body della challenge NTLM (`NTLMSSP_CHALLENGE`), non più in ASN.1: qui compaiono l'`NTLM Server Challenge` (8 byte) e il `Target Info` con i dettagli del dominio/host del server:
+**4. Session Setup AndX Response (`0x73`), NTLMSSP_CHALLENGE.** Il server risponde con un altro `Session Setup AndX`, nel quale, come nella request del client, il `SecurityBlob` ha ancora l'involucro ASN.1/SPNEGO (ma ora `negTokenTarg`/`negState: accept-incomplete`), e al suo interno il `responseToken` contiene il body della challenge NTLM (`NTLMSSP_CHALLENGE`), non più in ASN.1: qui compaiono l'`NTLM Server Challenge` (8 byte) e il `Target Info` con i dettagli del dominio/host del server:
 
 ![Session Setup AndX Response - NTLMSSP_CHALLENGE](/assets/img/smb-ntlm-study/wireshark-sessionsetup-challenge.png)
 
@@ -261,13 +275,13 @@ Il contenuto del `SecurityBlob` resta uguale tra SMB1 e SMB2: cambia solo l'invo
 
 ![Session Setup AndX Request - NTLMSSP_AUTH](/assets/img/smb-ntlm-study/wireshark-sessionsetup-auth.png)
 
-Nella cattura di esempio, dopo questo scambio il server risponde con `STATUS_ACCOUNT_DISABLED` (l'utente di test usato non è abilitato) - ma a questo punto, dal punto di vista dell'intercettazione, non importa: tutto il materiale NTLMv2 necessario (username, dominio, hostname, server challenge, NTLM response) è già transitato in chiaro sulla rete, dentro il pacchetto 5.
+Nella cattura di esempio, dopo questo scambio il server risponde con `STATUS_ACCOUNT_DISABLED` (l'utente di test usato non è abilitato), ma a questo punto, dal punto di vista dell'intercettazione, non importa: tutto il materiale NTLMv2 necessario (username, dominio, hostname, server challenge, NTLM response) è già transitato sulla rete, dentro il pacchetto 5.
 
 Il punto chiave di tutto lo scambio è che dentro il `SecurityBlob` convivono **due mondi diversi**: una parte codificata in ASN.1 (GSSAPI/SPNEGO) e una parte che, a un certo punto, "esce" da ASN.1 ed è codificata secondo NTLMSSP, in little-endian. Nei prossimi paragrafi vediamo perché, ed entriamo byte per byte in entrambi i livelli.
 
 ## 5. ASN.1 DER: il linguaggio sotto SPNEGO
 
-**ASN.1** è un linguaggio che descrive strutture dati, ma non dice come serializzarle in byte: per quello servono le **Encoding Rules**. Nel nostro caso, i blob di sicurezza SMB usano **DER** (Distinguished Encoding Rules), un sottoinsieme stretto di BER che garantisce una codifica unica e deterministica.
+**ASN.1** è un linguaggio che descrive strutture dati, ma non dice come serializzarle in byte, per quello servono le **Encoding Rules**. Nel nostro caso, i blob di sicurezza SMB usano **DER** (Distinguished Encoding Rules), un sottoinsieme stretto di BER che garantisce una codifica unica e deterministica.
 
 Il formato di trasferimento è sempre **TLV** (Tag, Length, Value):
 
@@ -293,9 +307,8 @@ Alcuni tag ricorrenti nei blob SMB: `0x30` (SEQUENCE), `0x06` (OBJECT IDENTIFIER
 > - [DER Transfer Syntax](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-transfer-syntax)
 > - [Encoded Length and Value Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-length-and-value-bytes)
 > - [DER Encoding of ASN.1 Types](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-encoding-of-asn-1-types)
-> *(fonte: Microsoft Learn)*
 
-Per esercitarmi su questo ho scritto **[asn1_parser](https://github.com/lcky00/asn1_parser)**, un parser DER minimale in C che costruisce un albero navigabile dei nodi, con tanto di logger per stampare la struttura annidata:
+Per esercitarmi su questo ho scritto **[asn1_parser](https://github.com/lcky00/asn1_parser)**, un parser DER in C che costruisce un albero navigabile dei nodi, con tanto di logger per stampare la struttura annidata:
 
 ```c
 asn1_tree_t tree;
@@ -310,24 +323,24 @@ dump_asn1_tree(tree);
 asn1_tree_free(&tree);
 ```
 
-## 5. Il modello a cipolla: GSSAPI → SPNEGO → NTLMSSP
+## 5. Il modello a cipolla: GSSAPI -> SPNEGO -> NTLMSSP
 
 Il modo più utile che ho trovato per visualizzare il `SecurityBlob` è come una matrioska a tre livelli:
 
 ![Modello a strati GSSAPI, SPNEGO, NTLMSSP](/assets/img/smb-ntlm-study/onion.png)
 
-1. **GSSAPI (Initial Token)** - la "busta" standardizzata, in ASN.1 DER, che dice all'applicazione: *attenzione, questo è un token di negoziazione*.
-2. **SPNEGO (`negTokenInit` / `negTokenResp`)** - anch'esso ASN.1 DER, contiene la lista dei meccanismi supportati (gli OID) e lo stato della negoziazione.
-3. **Il payload del meccanismo scelto (NTLMSSP)** - da qui ASN.1 finisce: il payload è incapsulato in un **Octet String** (`0x04`), e da quel byte in poi si passa alle regole specifiche di NTLMSSP, in **little-endian**.
+1. **GSSAPI (Initial Token)**: la "busta" standardizzata, in ASN.1 DER, che dice all'applicazione: *attenzione, questo è un token di negoziazione*.
+2. **SPNEGO (`negTokenInit` / `negTokenResp`)**: anch'esso ASN.1 DER, contiene la lista dei meccanismi supportati (gli OID) e lo stato della negoziazione.
+3. **Il payload del meccanismo scelto (NTLMSSP)**: da qui ASN.1 finisce. Il payload è incapsulato in un **Octet String** (`0x04`), e da quel byte in poi si passa alle regole specifiche di NTLMSSP, in **little-endian**.
 
-Perché serve SPNEGO? Perché client e server potrebbero supportare meccanismi diversi (Kerberos, NTLM...): **GSSAPI** ([RFC 2743](https://datatracker.ietf.org/doc/html/rfc2743)) fornisce l'interfaccia standard per gestire la sicurezza senza conoscere i dettagli del meccanismo specifico, mentre **SPNEGO** ([RFC 4178](https://datatracker.ietf.org/doc/html/rfc4178)) è lo "pseudo-meccanismo" che permette di negoziare in sicurezza quale meccanismo reale usare.
+Perché serve SPNEGO? Perché client e server potrebbero supportare meccanismi diversi (Kerberos, NTLM, ecc). **GSSAPI** ([RFC 2743](https://datatracker.ietf.org/doc/html/rfc2743)) fornisce l'interfaccia standard per gestire la sicurezza senza conoscere i dettagli del meccanismo specifico, mentre **SPNEGO** ([RFC 4178](https://datatracker.ietf.org/doc/html/rfc4178)) è lo "pseudo-meccanismo" che permette di negoziare in sicurezza quale meccanismo reale usare.
 
 I due tipi di token SPNEGO principali sono:
 
 - **`NegTokenInit`** (tag `0xa0`): propone i meccanismi (`mechTypes`), eventuali flag di contesto (`reqFlags`), un token "ottimistico" (`mechToken`) e un MIC per l'integrità.
 - **`NegTokenResp`** (tag `0xa1`): comunica lo stato della negoziazione (`negState`: `accept-completed`, `accept-incomplete`, `reject`), il meccanismo scelto (`supportedMech`, solo nella prima risposta) e il payload vero e proprio (`responseToken`).
 
-Per decodificare questo layer ho scritto **[spnego_decoder](https://github.com/lcky00/spnego_decoder)**, una libreria C **zero-copy**: prende in input l'albero ASN.1 già costruito da `asn1_parser` e, invece di ricopiare i byte, popola una struttura con puntatori diretti ai nodi dell'albero - compreso il payload NTLM interno, pronto per il passo successivo.
+Per decodificare questo layer ho scritto **[spnego_decoder](https://github.com/lcky00/spnego_decoder)**, una libreria C **zero-copy** che prende in input l'albero ASN.1 già costruito da `asn1_parser` e, invece di ricopiare i byte, popola una struttura con puntatori diretti ai nodi dell'albero, compreso il payload NTLM interno, pronto per il passo successivo.
 
 ## 6. Dentro i blob: le 4 fasi byte per byte
 
