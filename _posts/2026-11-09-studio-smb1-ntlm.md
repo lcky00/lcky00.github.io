@@ -6,8 +6,6 @@ author: lcky00
 tags: [SMB1, NTLM, ASN.1, SPNEGO, Red Team]
 ---
 
-*Tag: SMB1 · NTLM · ASN.1 · SPNEGO · Red Team*
-
 Negli ultimi mesi mi sono dedicato a uno studio approfondito di **SMB1** e di come al suo interno viaggia l'autenticazione **NTLM**. Non un'analisi "ad alto livello" presa da qualche slide, ma uno smontaggio byte per byte dei pacchetti scambiati tra client e server, fino a scrivere dei parser in **C** che li decodificano da zero.
 
 Questo post mette insieme il lavoro fatto in diverse repo (gli appunti di studio, i parser e un server di validazione) in un unico percorso: da NetBIOS fino all'ultimo byte del blob NTLMSSP.
@@ -362,10 +360,10 @@ Se avete domande o note su qualche passaggio, scrivetemi pure.
 
 Le specifiche ufficiali usate per questo studio:
 
-- [\[MS-CIFS\]: Common Internet File System](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) - struttura base di SMB1/CIFS
-- [\[MS-SMB\]: Server Message Block Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb) - estensioni NT LM 0.12 ed Extended Security
-- [\[MS-SMB2\]: Server Message Block Version 2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/)
-- [\[MS-NLMP\]: NT LAN Manager (NTLM) Authentication Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/)
+- [MS-CIFS: Common Internet File System](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs) - struttura base di SMB1/CIFS
+- [MS-SMB: Server Message Block Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb) - estensioni NT LM 0.12 ed Extended Security
+- [MS-SMB2: Server Message Block Version 2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/)
+- [MS-NLMP: NT LAN Manager (NTLM) Authentication Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/)
 - [RFC 4178 - The Simple and Protected GSS-API Negotiation Mechanism (SPNEGO)](https://datatracker.ietf.org/doc/html/rfc4178)
 - [RFC 2743 - Generic Security Service Application Program Interface (GSSAPI)](https://datatracker.ietf.org/doc/html/rfc2743)
 - Microsoft Learn, serie "About ASN.1": [Introduction to ASN.1 Syntax and Encoding](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-introduction-to-asn-1-syntax-and-encoding), [Encoded Tag Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-tag-bytes), [DER Transfer Syntax](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-transfer-syntax), [Encoded Length and Value Bytes](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-encoded-length-and-value-bytes), [DER Encoding of ASN.1 Types](https://learn.microsoft.com/en-us/windows/win32/seccertenroll/about-der-encoding-of-asn-1-types)
